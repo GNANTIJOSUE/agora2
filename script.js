@@ -249,17 +249,17 @@ function handleMessage(message) {
         const data = JSON.parse(message.message);
         console.log("Message reçu:", data);
 
-        if (data.type === 'permission_request' && isModerator) {
-            // Ajouter l'utilisateur à la liste des utilisateurs en attente
-            pendingUsers.add(data.uid);
-            addPendingUserControl(data.uid);
+        if (data.type === 'permission_request') {
+            if (isModerator) {
+                addPendingUserControl(data.uid);
+            }
         } else if (data.type === 'permission_response') {
             if (data.approved) {
                 // L'utilisateur a été approuvé, continuer avec la connexion
                 initializeUserConnection();
             } else {
                 // L'utilisateur a été rejeté
-                alert("Votre demande de connexion a été rejetée");
+                alert("Votre demande d'accès a été rejetée par le modérateur.");
                 leaveCall();
             }
         } else if (data.type === 'moderator') {
@@ -394,22 +394,20 @@ async function toggleCamera() {
 
 // Fonction pour ajouter un contrôle pour un utilisateur en attente
 function addPendingUserControl(uid) {
-    const controlsDiv = document.createElement('div');
-    controlsDiv.className = 'pending-user-control';
-    controlsDiv.innerHTML = `
-        <div class="pending-user-info">
-            <span>Utilisateur ${uid}</span>
-            <div class="pending-user-actions">
-                <button onclick="approveUser(${uid})" class="approve-btn">
-                    <i class="fas fa-check"></i> Approuver
-                </button>
-                <button onclick="rejectUser(${uid})" class="reject-btn">
-                    <i class="fas fa-times"></i> Rejeter
-                </button>
-            </div>
-        </div>
+    const moderatorControls = document.getElementById('moderator-controls');
+    const pendingUserDiv = document.createElement('div');
+    pendingUserDiv.id = `pending-user-${uid}`;
+    pendingUserDiv.className = 'pending-user-control';
+    pendingUserDiv.innerHTML = `
+        <span>Utilisateur ${uid} demande l'accès</span>
+        <button onclick="approveUser(${uid})" class="approve-btn">
+            <i class="fas fa-check"></i> Approuver
+        </button>
+        <button onclick="rejectUser(${uid})" class="reject-btn">
+            <i class="fas fa-times"></i> Rejeter
+        </button>
     `;
-    document.getElementById('moderator-controls').appendChild(controlsDiv);
+    moderatorControls.appendChild(pendingUserDiv);
 }
 
 // Fonction pour approuver un utilisateur
@@ -419,10 +417,9 @@ async function approveUser(uid) {
             type: 'permission_response',
             approved: true
         }));
-        pendingUsers.delete(uid);
         removePendingUserControl(uid);
     } catch (error) {
-        console.error("Erreur lors de l'approbation de l'utilisateur:", error);
+        console.error("Erreur lors de l'approbation:", error);
     }
 }
 
@@ -433,27 +430,34 @@ async function rejectUser(uid) {
             type: 'permission_response',
             approved: false
         }));
-        pendingUsers.delete(uid);
         removePendingUserControl(uid);
     } catch (error) {
-        console.error("Erreur lors du rejet de l'utilisateur:", error);
+        console.error("Erreur lors du rejet:", error);
     }
 }
 
 // Fonction pour supprimer le contrôle d'un utilisateur en attente
 function removePendingUserControl(uid) {
-    const control = document.querySelector(`.pending-user-control[data-uid="${uid}"]`);
-    if (control) {
-        control.remove();
+    const pendingUserDiv = document.getElementById(`pending-user-${uid}`);
+    if (pendingUserDiv) {
+        pendingUserDiv.remove();
     }
 }
 
 // Fonction pour initialiser la connexion d'un utilisateur approuvé
 async function initializeUserConnection() {
     try {
+        console.log("Création des tracks audio et vidéo...");
         localTracks = await AgoraRTC.createMicrophoneAndCameraTracks();
+        console.log("Tracks créées avec succès:", localTracks);
+
+        if (!localTracks || localTracks.length < 2) {
+            throw new Error("Erreur lors de la création des tracks");
+        }
+
         localTracks[1].play("local-video");
         await client.publish(localTracks);
+        console.log("Tracks publiées avec succès");
 
         document.querySelector('.control-buttons').style.display = 'flex';
         document.querySelector('#status-indicators').style.display = 'inline-block';
@@ -465,7 +469,7 @@ async function initializeUserConnection() {
         updateIndicators();
         updateUserCount();
     } catch (error) {
-        console.error("Erreur lors de l'initialisation de la connexion:", error);
+        console.error("Erreur lors de l'initialisation:", error);
         alert("Erreur lors de la connexion: " + error.message);
         leaveCall();
     }
