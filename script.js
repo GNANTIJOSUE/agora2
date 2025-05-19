@@ -64,10 +64,13 @@ async function joinCall() {
 
         try {
             client = AgoraRTC.createClient({ mode: "rtc", codec: "vp8" });
+            console.log("Client Agora créé avec succès");
         } catch (error) {
+            console.error("Erreur lors de la création du client:", error);
             throw new Error("Erreur lors de la création du client: " + error.message);
         }
 
+        // Configuration des événements
         client.on("user-published", handleUserPublished);
         client.on("user-unpublished", handleUserUnpublished);
         client.on("user-left", handleUserLeft);
@@ -82,25 +85,31 @@ async function joinCall() {
             await client.join(config.appId, config.channel, config.token, config.uid);
             console.log("Connexion au canal réussie");
         } catch (error) {
+            console.error("Erreur lors de la connexion au canal:", error);
             throw new Error("Erreur lors de la connexion au canal: " + error.message);
         }
 
         // Vérifier si c'est le premier utilisateur
-        const channelInfo = await client.getChannelInfo();
-        isModerator = channelInfo.userCount === 1; // Changé de 0 à 1 car l'utilisateur est déjà compté
-        console.log("Est modérateur:", isModerator);
+        try {
+            const channelInfo = await client.getChannelInfo();
+            console.log("Informations du canal:", channelInfo);
+            isModerator = channelInfo.userCount === 1;
+            console.log("Est modérateur:", isModerator);
 
-        if (!isModerator) {
-            // Envoyer une demande de permission au modérateur
-            await client.sendUserMessage(0, JSON.stringify({
-                type: 'permission_request',
-                uid: config.uid
-            }));
+            if (!isModerator) {
+                console.log("Utilisateur non modérateur, envoi de la demande de permission");
+                await client.sendUserMessage(0, JSON.stringify({
+                    type: 'permission_request',
+                    uid: config.uid
+                }));
 
-            // Afficher un message d'attente
-            document.getElementById("status-indicators").innerHTML =
-                '<div class="waiting-message">En attente de l\'approbation du modérateur...</div>';
-            return;
+                document.getElementById("status-indicators").innerHTML =
+                    '<div class="waiting-message">En attente de l\'approbation du modérateur...</div>';
+                return;
+            }
+        } catch (error) {
+            console.error("Erreur lors de la vérification du statut modérateur:", error);
+            throw new Error("Erreur lors de la vérification du statut modérateur: " + error.message);
         }
 
         // Si c'est le modérateur ou si l'utilisateur a été approuvé
@@ -131,6 +140,7 @@ async function joinCall() {
             updateIndicators();
             updateUserCount();
         } catch (error) {
+            console.error("Erreur lors de la création ou publication des tracks:", error);
             throw new Error("Erreur lors de la création ou publication des tracks: " + error.message);
         }
     } catch (error) {
@@ -138,11 +148,13 @@ async function joinCall() {
         alert("Erreur lors de la connexion: " + error.message);
         document.getElementById("join-btn").disabled = false;
 
+        // Nettoyage en cas d'erreur
         if (client) {
             try {
                 await client.leave();
+                console.log("Client déconnecté avec succès");
             } catch (e) {
-                console.error("Erreur lors du nettoyage:", e);
+                console.error("Erreur lors de la déconnexion du client:", e);
             }
         }
         if (localTracks) {
@@ -150,6 +162,7 @@ async function joinCall() {
                 try {
                     track.stop();
                     track.close();
+                    console.log("Track arrêtée et fermée avec succès");
                 } catch (e) {
                     console.error("Erreur lors de la fermeture des tracks:", e);
                 }
