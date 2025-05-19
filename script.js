@@ -85,29 +85,25 @@ async function joinCall() {
             throw new Error("Erreur lors de la connexion au canal: " + error.message);
         }
 
-        try {
-            const channelInfo = await client.getChannelInfo();
-            isModerator = channelInfo.userCount === 0;
-            console.log("Est modérateur:", isModerator);
+        // Vérifier si c'est le premier utilisateur
+        const channelInfo = await client.getChannelInfo();
+        isModerator = channelInfo.userCount === 1; // Changé de 0 à 1 car l'utilisateur est déjà compté
+        console.log("Est modérateur:", isModerator);
 
-            if (!isModerator) {
-                // Envoyer une demande de permission au modérateur
-                await client.sendUserMessage(0, JSON.stringify({
-                    type: 'permission_request',
-                    uid: config.uid
-                }));
+        if (!isModerator) {
+            // Envoyer une demande de permission au modérateur
+            await client.sendUserMessage(0, JSON.stringify({
+                type: 'permission_request',
+                uid: config.uid
+            }));
 
-                // Afficher un message d'attente
-                document.getElementById("status-indicators").innerHTML =
-                    '<div class="waiting-message">En attente de l\'approbation du modérateur...</div>';
-                return;
-            }
-        } catch (error) {
-            console.warn("Impossible de récupérer les informations du canal:", error);
-            isModerator = false;
+            // Afficher un message d'attente
+            document.getElementById("status-indicators").innerHTML =
+                '<div class="waiting-message">En attente de l\'approbation du modérateur...</div>';
+            return;
         }
 
-        // Continuer avec la création des tracks seulement si modérateur ou approuvé
+        // Si c'est le modérateur ou si l'utilisateur a été approuvé
         try {
             console.log("Création des tracks audio et vidéo...");
             localTracks = await AgoraRTC.createMicrophoneAndCameraTracks();
