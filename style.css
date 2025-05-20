@@ -270,64 +270,108 @@ footer {
 #moderator-controls {
     display: none;
     flex-direction: column;
-    gap: 10px;
+    gap: 15px;
     margin: 20px 0;
-    padding: 15px;
-    background-color: #f5f5f5;
-    border-radius: 8px;
+    padding: 20px;
+    background-color: #f8f9fa;
+    border-radius: 12px;
     box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
 }
 
-.pending-user-control {
+.user-control {
+    background-color: white;
+    border-radius: 8px;
+    padding: 15px;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+    margin-bottom: 10px;
+}
+
+.user-info {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 10px;
+}
+
+.user-info span {
+    font-weight: 500;
+    color: #333;
+    font-size: 1.1em;
+}
+
+.user-controls {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+
+.control-btn {
+    padding: 8px 16px;
+    border: none;
+    border-radius: 6px;
+    background-color: #e9ecef;
+    color: #495057;
+    cursor: pointer;
+    transition: all 0.2s ease;
     display: flex;
     align-items: center;
-    justify-content: space-between;
-    padding: 10px;
-    background-color: white;
-    border-radius: 6px;
-    margin-bottom: 8px;
-    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+    gap: 8px;
+    font-size: 0.9em;
+    min-width: 100px;
+    justify-content: center;
 }
 
-.pending-user-control span {
-    font-size: 14px;
-    color: #333;
+.control-btn:hover {
+    background-color: #dee2e6;
+    transform: translateY(-2px);
 }
 
-.pending-user-control button {
-    padding: 6px 12px;
+.control-btn.active {
+    background-color: #4361ee;
+    color: white;
+}
+
+.control-btn.active:hover {
+    background-color: #3f37c9;
+}
+
+.kick-btn {
+    background-color: #dc3545;
+    color: white;
+    padding: 8px 16px;
     border: none;
-    border-radius: 4px;
+    border-radius: 6px;
     cursor: pointer;
-    font-size: 13px;
     transition: all 0.2s ease;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 0.9em;
+    min-width: 100px;
+    justify-content: center;
 }
 
-.approve-btn {
+.kick-btn:hover {
+    background-color: #c82333;
+    transform: translateY(-2px);
+}
+
+.control-btn i {
+    font-size: 1.1em;
+}
+
+.role-indicator {
     background-color: #4CAF50;
     color: white;
-    margin-right: 8px;
-}
-
-.approve-btn:hover {
-    background-color: #45a049;
-}
-
-.reject-btn {
-    background-color: #f44336;
-    color: white;
-}
-
-.reject-btn:hover {
-    background-color: #da190b;
-}
-
-.waiting-message {
+    padding: 8px 16px;
+    border-radius: 20px;
+    font-weight: bold;
+    margin-bottom: 10px;
     text-align: center;
-    padding: 15px;
-    background-color: #fff3cd;
-    color: #856404;
-    border-radius: 6px;
-    margin: 10px 0;
-    font-size: 14px;
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+}
+
+.role-indicator:has(👑) {
+    background-color: #FFD700;
+    color: #000;
 }

@@ -10,14 +10,13 @@ let client;
 let localTracks = [];
 let remoteUsers = {};
 let isModerator = false;
-let firstUserJoined = false;
-let pendingUsers = new Set(); // Pour stocker les utilisateurs en attente
+let pendingUsers = new Set();
+let moderatorLock = false;
+let dataChannel;
 
 document.addEventListener("DOMContentLoaded", () => {
     document.getElementById("join-btn").addEventListener("click", joinCall);
     document.getElementById("leave-btn").addEventListener("click", leaveCall);
-
-    // Boutons micro / caméra
     document.getElementById('toggleMic').addEventListener('click', toggleMic);
     document.getElementById('toggleCamera').addEventListener('click', toggleCamera);
 });
@@ -62,175 +61,206 @@ async function joinCall() {
 
         document.getElementById("join-btn").disabled = true;
 
-        try {
-            client = AgoraRTC.createClient({ mode: "rtc", codec: "vp8" });
-            console.log("Client Agora créé avec succès");
-        } catch (error) {
-            console.error("Erreur lors de la création du client:", error);
-            throw new Error("Erreur lors de la création du client: " + error.message);
-        }
+        // Création du client
+        client = AgoraRTC.createClient({ mode: "rtc", codec: "vp8" });
+        console.log("Client Agora créé avec succès");
 
         // Configuration des événements
-        client.on("user-published", handleUserPublished);
-        client.on("user-unpublished", handleUserUnpublished);
-        client.on("user-left", handleUserLeft);
-        client.on("user-joined", handleUserJoined);
-        client.on("message", handleMessage);
-        client.on("connection-state-change", (curState, prevState) => {
-            console.log("État de la connexion:", prevState, "->", curState);
-        });
+        setupEventHandlers();
 
+        // Connexion au canal
         console.log("Tentative de connexion au canal:", config.channel);
-        try {
-            await client.join(config.appId, config.channel, config.token, config.uid);
-            console.log("Connexion au canal réussie");
-        } catch (error) {
-            console.error("Erreur lors de la connexion au canal:", error);
-            throw new Error("Erreur lors de la connexion au canal: " + error.message);
+        await client.join(config.appId, config.channel, config.token, config.uid);
+        console.log("Connexion au canal réussie");
+
+        // Vérifier si un modérateur existe déjà pour ce canal
+        const moderatorKey = `moderator_${config.channel}`;
+        const existingModerator = localStorage.getItem(moderatorKey);
+
+        if (!existingModerator) {
+            // Si aucun modérateur n'existe, on devient modérateur
+            localStorage.setItem(moderatorKey, config.uid.toString());
+            isModerator = true;
+            document.getElementById('moderator-controls').style.display = 'flex';
+            console.log("Utilisateur est devenu modérateur");
+        } else if (existingModerator === config.uid.toString()) {
+            // Si on est déjà le modérateur
+            isModerator = true;
+            document.getElementById('moderator-controls').style.display = 'flex';
+            console.log("Utilisateur est modérateur");
+        } else {
+            // Si quelqu'un d'autre est modérateur
+            isModerator = false;
+            document.getElementById('moderator-controls').style.display = 'none';
+            console.log("Utilisateur est participant");
         }
 
-        // Vérifier si c'est le premier utilisateur
-        try {
-            const channelInfo = await client.getChannelInfo();
-            console.log("Informations du canal:", channelInfo);
-            isModerator = channelInfo.userCount === 1;
-            console.log("Est modérateur:", isModerator);
+        // Initialiser les tracks immédiatement
+        await initializeTracks();
 
-            if (!isModerator) {
-                console.log("Utilisateur non modérateur, envoi de la demande de permission");
-                await client.sendUserMessage(0, JSON.stringify({
-                    type: 'permission_request',
-                    uid: config.uid
-                }));
-
-                document.getElementById("status-indicators").innerHTML =
-                    '<div class="waiting-message">En attente de l\'approbation du modérateur...</div>';
-                return;
-            }
-        } catch (error) {
-            console.error("Erreur lors de la vérification du statut modérateur:", error);
-            throw new Error("Erreur lors de la vérification du statut modérateur: " + error.message);
-        }
-
-        // Si c'est le modérateur ou si l'utilisateur a été approuvé
-        try {
-            console.log("Création des tracks audio et vidéo...");
-            localTracks = await AgoraRTC.createMicrophoneAndCameraTracks();
-            console.log("Tracks créées avec succès:", localTracks);
-
-            if (!localTracks || localTracks.length < 2) {
-                throw new Error("Erreur lors de la création des tracks");
-            }
-
-            localTracks[1].play("local-video");
-            await client.publish(localTracks);
-            console.log("Tracks publiées avec succès");
-
-            document.querySelector('.control-buttons').style.display = 'flex';
-            document.querySelector('#status-indicators').style.display = 'inline-block';
-            document.querySelector('.input-group').style.display = 'none';
-            document.querySelector('#join-btn').style.display = 'none';
-            document.querySelector('footer').style.display = 'none';
-            document.getElementById("leave-btn").disabled = false;
-
-            if (isModerator) {
-                document.getElementById('moderator-controls').style.display = 'flex';
-            }
-
-            updateIndicators();
-            updateUserCount();
-        } catch (error) {
-            console.error("Erreur lors de la création ou publication des tracks:", error);
-            throw new Error("Erreur lors de la création ou publication des tracks: " + error.message);
-        }
     } catch (error) {
-        console.error("Erreur détaillée:", error);
+        console.error("Erreur lors de la connexion:", error);
         alert("Erreur lors de la connexion: " + error.message);
         document.getElementById("join-btn").disabled = false;
-
-        // Nettoyage en cas d'erreur
-        if (client) {
-            try {
-                await client.leave();
-                console.log("Client déconnecté avec succès");
-            } catch (e) {
-                console.error("Erreur lors de la déconnexion du client:", e);
-            }
-        }
-        if (localTracks) {
-            localTracks.forEach(track => {
-                try {
-                    track.stop();
-                    track.close();
-                    console.log("Track arrêtée et fermée avec succès");
-                } catch (e) {
-                    console.error("Erreur lors de la fermeture des tracks:", e);
-                }
-            });
-        }
+        await cleanupResources();
     }
 }
 
-async function leaveCall() {
-    for (let track of localTracks) {
-        track.stop();
-        track.close();
-    }
-
-    await client.leave();
-
-    document.getElementById("join-btn").disabled = false;
-    document.getElementById("leave-btn").disabled = true;
-
-    // Nettoie les vidéos distantes
-    Object.keys(remoteUsers).forEach(uid => {
-        const el = document.getElementById(`user-${uid}`);
-        if (el) el.remove();
+function setupEventHandlers() {
+    client.on("user-published", handleUserPublished);
+    client.on("user-unpublished", handleUserUnpublished);
+    client.on("user-left", handleUserLeft);
+    client.on("user-joined", handleUserJoined);
+    client.on("connection-state-change", (curState, prevState) => {
+        console.log("État de la connexion:", prevState, "->", curState);
     });
 
-    remoteUsers = {};
-    updateUserCount();
+    // Gestionnaire pour le canal de données
+    if (dataChannel) {
+        dataChannel.on("message", handleDataChannelMessage);
+    }
+}
 
-    // Réinitialise les indicateurs
-    document.querySelector('.control-buttons').style.display = 'none';
-    document.getElementById("mic-status").textContent = "🎤 Muet";
-    document.getElementById("cam-status").textContent = "📷 Caméra coupée";
-    document.getElementById("mic-status").classList.add("muted");
-    document.getElementById("cam-status").classList.add("muted");
-    setTimeout(function() {
-        location.reload();
-    }, 2000);
+async function initializeTracks() {
+    try {
+        console.log("Création des tracks audio et vidéo...");
+        localTracks = await AgoraRTC.createMicrophoneAndCameraTracks();
+        console.log("Tracks créées avec succès");
 
+        if (!localTracks || localTracks.length < 2) {
+            throw new Error("Erreur lors de la création des tracks");
+        }
+
+        localTracks[1].play("local-video");
+        await client.publish(localTracks);
+        console.log("Tracks publiées avec succès");
+
+        updateUI();
+        updateIndicators();
+        updateUserCount();
+    } catch (error) {
+        console.error("Erreur lors de l'initialisation des tracks:", error);
+        throw error;
+    }
+}
+
+function updateUI() {
+    document.querySelector('.control-buttons').style.display = 'flex';
+    document.querySelector('#status-indicators').style.display = 'inline-block';
+    document.querySelector('.input-group').style.display = 'none';
+    document.querySelector('#join-btn').style.display = 'none';
+    document.querySelector('footer').style.display = 'none';
+    document.getElementById("leave-btn").disabled = false;
+
+    // Ajouter l'indicateur de rôle
+    const roleIndicator = document.createElement('div');
+    roleIndicator.id = 'role-indicator';
+    roleIndicator.className = 'role-indicator';
+    roleIndicator.textContent = isModerator ? '👑 Modérateur' : '👤 Participant';
+    document.querySelector('.control-buttons').prepend(roleIndicator);
+}
+
+function handleUserJoined(user) {
+    console.log("Nouvel utilisateur rejoint:", user.uid);
+}
+
+function handleDataChannelMessage(event) {
+    try {
+        const data = JSON.parse(event.data);
+        console.log("Message reçu:", data);
+
+        if (data.type === 'check_moderator') {
+            if (isModerator) {
+                // Si on est déjà modérateur, on répond
+                dataChannel.send(JSON.stringify({
+                    type: 'moderator_exists',
+                    uid: config.uid
+                }));
+            }
+        } else if (data.type === 'moderator_exists') {
+            // Si quelqu'un répond qu'il est modérateur, on envoie une demande de permission
+            isModerator = false;
+            dataChannel.send(JSON.stringify({
+                type: 'permission_request',
+                uid: config.uid
+            }));
+            document.getElementById("status-indicators").innerHTML =
+                '<div class="waiting-message">En attente de l\'approbation du modérateur...</div>';
+        } else if (data.type === 'permission_request') {
+            if (isModerator) {
+                console.log("Demande de permission reçue de l'utilisateur:", data.uid);
+                addPendingUserControl(data.uid);
+            }
+        } else if (data.type === 'permission_response') {
+            if (data.approved) {
+                console.log("Permission accordée pour l'utilisateur:", data.uid);
+                initializeTracks();
+            } else {
+                console.log("Permission refusée pour l'utilisateur:", data.uid);
+                alert("Votre demande d'accès a été rejetée par le modérateur.");
+                leaveCall();
+            }
+        } else if (data.type === 'moderator') {
+            if (data.action === 'toggleMic' && localTracks[0]) {
+                localTracks[0].setMuted(!localTracks[0].muted);
+                updateIndicators();
+            } else if (data.action === 'toggleCamera' && localTracks[1]) {
+                localTracks[1].setMuted(!localTracks[1].muted);
+                updateIndicators();
+            } else if (data.action === 'kick') {
+                leaveCall();
+            }
+        }
+    } catch (error) {
+        console.error("Erreur lors du traitement du message:", error);
+    }
+}
+
+async function cleanupResources() {
+    if (client) {
+        try {
+            await client.leave();
+            console.log("Client déconnecté avec succès");
+        } catch (e) {
+            console.error("Erreur lors de la déconnexion du client:", e);
+        }
+    }
+    if (localTracks) {
+        localTracks.forEach(track => {
+            try {
+                track.stop();
+                track.close();
+                console.log("Track arrêtée et fermée avec succès");
+            } catch (e) {
+                console.error("Erreur lors de la fermeture des tracks:", e);
+            }
+        });
+    }
 }
 
 async function handleUserPublished(user, mediaType) {
-    remoteUsers[user.uid] = user;
-    await client.subscribe(user, mediaType);
+    try {
+        remoteUsers[user.uid] = user;
+        await client.subscribe(user, mediaType);
 
-    if (mediaType === "video") {
-        addVideoStream(user);
-        user.videoTrack.play(`user-${user.uid}`);
-    }
-
-    if (mediaType === "audio") {
-        user.audioTrack.play();
-    }
-
-    client.on("message", async(message) => {
-        if (message.uid === user.uid) {
-            try {
-                const data = JSON.parse(message.message);
-                if (data.type === 'toggleMic' && data.action === 'mute') {
-                    await localTracks[0].setMuted(true);
-                    updateIndicators();
-                }
-            } catch (error) {
-                console.error('Erreur lors du traitement du message:', error);
-            }
+        if (mediaType === "video") {
+            addVideoStream(user);
+            user.videoTrack.play(`user-${user.uid}`);
         }
-    });
 
-    updateUserCount();
+        if (mediaType === "audio") {
+            user.audioTrack.play();
+        }
+
+        // Si on est modérateur, ajouter les contrôles pour le nouvel utilisateur
+        if (isModerator) {
+            addModeratorControl(user.uid);
+        }
+
+        updateUserCount();
+    } catch (error) {
+        console.error("Erreur lors de la publication de l'utilisateur:", error);
+    }
 }
 
 function handleUserUnpublished(user) {
@@ -245,92 +275,6 @@ function handleUserLeft(user) {
     if (el) el.remove();
     delete remoteUsers[user.uid];
     updateUserCount();
-}
-
-function handleUserJoined(user) {
-    if (isModerator) {
-        addModeratorControl(user.uid);
-    }
-}
-
-function handleMessage(message) {
-    try {
-        const data = JSON.parse(message.message);
-        console.log("Message reçu:", data);
-
-        if (data.type === 'permission_request') {
-            if (isModerator) {
-                addPendingUserControl(data.uid);
-            }
-        } else if (data.type === 'permission_response') {
-            if (data.approved) {
-                // L'utilisateur a été approuvé, continuer avec la connexion
-                initializeUserConnection();
-            } else {
-                // L'utilisateur a été rejeté
-                alert("Votre demande d'accès a été rejetée par le modérateur.");
-                leaveCall();
-            }
-        } else if (data.type === 'moderator') {
-            if (data.action === 'muteMic') {
-                if (localTracks[0]) {
-                    localTracks[0].setMuted(true);
-                    updateIndicators();
-                }
-            } else if (data.action === 'muteCamera') {
-                if (localTracks[1]) {
-                    localTracks[1].setMuted(true);
-                    updateIndicators();
-                }
-            }
-        }
-    } catch (error) {
-        console.error("Erreur lors du traitement du message:", error);
-    }
-}
-
-function addModeratorControl(uid) {
-    const controlsDiv = document.createElement('div');
-    controlsDiv.className = 'moderator-control';
-    controlsDiv.innerHTML = `
-        <div class="moderator-user-controls">
-            <button onclick="toggleRemoteUserMic(${uid})" class="moderator-btn">
-                <i class="fas fa-microphone-slash"></i> Couper Micro
-            </button>
-            <button onclick="toggleRemoteUserCamera(${uid})" class="moderator-btn">
-                <i class="fas fa-video-slash"></i> Couper Caméra
-            </button>
-        </div>
-    `;
-    document.getElementById('moderator-controls').appendChild(controlsDiv);
-}
-
-async function toggleRemoteUserMic(uid) {
-    if (!isModerator) return;
-
-    try {
-        await client.sendUserMessage(uid, JSON.stringify({
-            type: 'moderator',
-            action: 'muteMic'
-        }));
-        console.log(`Micro coupé pour l'utilisateur ${uid}`);
-    } catch (error) {
-        console.error('Erreur lors de la tentative de couper le micro:', error);
-    }
-}
-
-async function toggleRemoteUserCamera(uid) {
-    if (!isModerator) return;
-
-    try {
-        await client.sendUserMessage(uid, JSON.stringify({
-            type: 'moderator',
-            action: 'muteCamera'
-        }));
-        console.log(`Caméra coupée pour l'utilisateur ${uid}`);
-    } catch (error) {
-        console.error('Erreur lors de la tentative de couper la caméra:', error);
-    }
 }
 
 // Fonction pour créer la vidéo distante
@@ -408,13 +352,17 @@ function addPendingUserControl(uid) {
     pendingUserDiv.id = `pending-user-${uid}`;
     pendingUserDiv.className = 'pending-user-control';
     pendingUserDiv.innerHTML = `
-        <span>Utilisateur ${uid} demande l'accès</span>
-        <button onclick="approveUser(${uid})" class="approve-btn">
-            <i class="fas fa-check"></i> Approuver
-        </button>
-        <button onclick="rejectUser(${uid})" class="reject-btn">
-            <i class="fas fa-times"></i> Rejeter
-        </button>
+        <div class="user-info">
+            <span>Utilisateur ${uid} demande l'accès</span>
+            <div class="user-controls">
+                <button onclick="approveUser(${uid})" class="approve-btn">
+                    <i class="fas fa-check"></i> Approuver
+                </button>
+                <button onclick="rejectUser(${uid})" class="reject-btn">
+                    <i class="fas fa-times"></i> Rejeter
+                </button>
+            </div>
+        </div>
     `;
     moderatorControls.appendChild(pendingUserDiv);
 }
@@ -422,11 +370,13 @@ function addPendingUserControl(uid) {
 // Fonction pour approuver un utilisateur
 async function approveUser(uid) {
     try {
-        await client.sendUserMessage(uid, JSON.stringify({
+        dataChannel.send(JSON.stringify({
             type: 'permission_response',
-            approved: true
+            approved: true,
+            uid: uid
         }));
         removePendingUserControl(uid);
+        addModeratorControl(uid);
     } catch (error) {
         console.error("Erreur lors de l'approbation:", error);
     }
@@ -435,9 +385,10 @@ async function approveUser(uid) {
 // Fonction pour rejeter un utilisateur
 async function rejectUser(uid) {
     try {
-        await client.sendUserMessage(uid, JSON.stringify({
+        dataChannel.send(JSON.stringify({
             type: 'permission_response',
-            approved: false
+            approved: false,
+            uid: uid
         }));
         removePendingUserControl(uid);
     } catch (error) {
@@ -453,33 +404,152 @@ function removePendingUserControl(uid) {
     }
 }
 
-// Fonction pour initialiser la connexion d'un utilisateur approuvé
-async function initializeUserConnection() {
-    try {
-        console.log("Création des tracks audio et vidéo...");
-        localTracks = await AgoraRTC.createMicrophoneAndCameraTracks();
-        console.log("Tracks créées avec succès:", localTracks);
+function addModeratorControl(uid) {
+    // Ne pas ajouter de contrôles si on n'est pas modérateur
+    if (!isModerator) return;
 
-        if (!localTracks || localTracks.length < 2) {
-            throw new Error("Erreur lors de la création des tracks");
+    const moderatorControls = document.getElementById('moderator-controls');
+    const userControlDiv = document.createElement('div');
+    userControlDiv.id = `user-control-${uid}`;
+    userControlDiv.className = 'user-control';
+    userControlDiv.innerHTML = `
+        <div class="user-info">
+            <span>Utilisateur ${uid}</span>
+            <div class="user-controls">
+                <button onclick="toggleRemoteUserMic(${uid})" class="control-btn" id="mic-control-${uid}">
+                    <i class="fas fa-microphone"></i> Micro
+                </button>
+                <button onclick="toggleRemoteUserCamera(${uid})" class="control-btn" id="cam-control-${uid}">
+                    <i class="fas fa-video"></i> Caméra
+                </button>
+                <button onclick="kickUser(${uid})" class="kick-btn">
+                    <i class="fas fa-user-slash"></i> Expulser
+                </button>
+            </div>
+        </div>
+    `;
+    moderatorControls.appendChild(userControlDiv);
+}
+
+async function toggleRemoteUserMic(uid) {
+    if (!isModerator) return;
+    const user = remoteUsers[uid];
+    if (user && user.audioTrack) {
+        try {
+            // Utiliser la méthode setEnabled sur le RemoteTrack
+            const isEnabled = user.audioTrack.enabled;
+            user.audioTrack.setEnabled(!isEnabled);
+
+            // Mettre à jour l'interface
+            const micButton = document.getElementById(`mic-control-${uid}`);
+            if (micButton) {
+                micButton.innerHTML = !isEnabled ?
+                    '<i class="fas fa-microphone"></i> Micro' :
+                    '<i class="fas fa-microphone-slash"></i> Micro';
+                micButton.classList.toggle('active', !isEnabled);
+            }
+
+            console.log(`Micro ${!isEnabled ? 'activé' : 'désactivé'} pour l'utilisateur ${uid}`);
+        } catch (error) {
+            console.error('Erreur lors de la tentative de basculer le micro:', error);
         }
-
-        localTracks[1].play("local-video");
-        await client.publish(localTracks);
-        console.log("Tracks publiées avec succès");
-
-        document.querySelector('.control-buttons').style.display = 'flex';
-        document.querySelector('#status-indicators').style.display = 'inline-block';
-        document.querySelector('.input-group').style.display = 'none';
-        document.querySelector('#join-btn').style.display = 'none';
-        document.querySelector('footer').style.display = 'none';
-        document.getElementById("leave-btn").disabled = false;
-
-        updateIndicators();
-        updateUserCount();
-    } catch (error) {
-        console.error("Erreur lors de l'initialisation:", error);
-        alert("Erreur lors de la connexion: " + error.message);
-        leaveCall();
     }
+}
+
+async function toggleRemoteUserCamera(uid) {
+    if (!isModerator) return;
+    const user = remoteUsers[uid];
+    if (user && user.videoTrack) {
+        try {
+            // Utiliser la méthode setEnabled sur le RemoteTrack
+            const isEnabled = user.videoTrack.enabled;
+            user.videoTrack.setEnabled(!isEnabled);
+
+            // Mettre à jour l'interface
+            const camButton = document.getElementById(`cam-control-${uid}`);
+            if (camButton) {
+                camButton.innerHTML = !isEnabled ?
+                    '<i class="fas fa-video"></i> Caméra' :
+                    '<i class="fas fa-video-slash"></i> Caméra';
+                camButton.classList.toggle('active', !isEnabled);
+            }
+
+            console.log(`Caméra ${!isEnabled ? 'activée' : 'désactivée'} pour l'utilisateur ${uid}`);
+        } catch (error) {
+            console.error('Erreur lors de la tentative de basculer la caméra:', error);
+        }
+    }
+}
+
+async function kickUser(uid) {
+    if (!isModerator) return;
+    const user = remoteUsers[uid];
+    if (user) {
+        try {
+            // Désabonner de tous les tracks
+            if (user.audioTrack) {
+                await client.unsubscribe(user, 'audio');
+            }
+            if (user.videoTrack) {
+                await client.unsubscribe(user, 'video');
+            }
+
+            // Supprimer les contrôles
+            const userControlDiv = document.getElementById(`user-control-${uid}`);
+            if (userControlDiv) {
+                userControlDiv.remove();
+            }
+
+            // Supprimer la vidéo
+            const videoDiv = document.getElementById(`user-${uid}`);
+            if (videoDiv) {
+                videoDiv.remove();
+            }
+
+            // Supprimer de la liste des utilisateurs
+            delete remoteUsers[uid];
+
+            console.log(`Utilisateur ${uid} expulsé`);
+            updateUserCount();
+        } catch (error) {
+            console.error('Erreur lors de la tentative d\'expulsion:', error);
+        }
+    }
+}
+
+async function leaveCall() {
+    // Si on est modérateur, libérer le rôle
+    if (isModerator) {
+        const moderatorKey = `moderator_${config.channel}`;
+        localStorage.removeItem(moderatorKey);
+    }
+
+    for (let track of localTracks) {
+        track.stop();
+        track.close();
+    }
+
+    await client.leave();
+
+    document.getElementById("join-btn").disabled = false;
+    document.getElementById("leave-btn").disabled = true;
+
+    // Nettoie les vidéos distantes
+    Object.keys(remoteUsers).forEach(uid => {
+        const el = document.getElementById(`user-${uid}`);
+        if (el) el.remove();
+    });
+
+    remoteUsers = {};
+    updateUserCount();
+
+    // Réinitialise les indicateurs
+    document.querySelector('.control-buttons').style.display = 'none';
+    document.getElementById("mic-status").textContent = "🎤 Muet";
+    document.getElementById("cam-status").textContent = "📷 Caméra coupée";
+    document.getElementById("mic-status").classList.add("muted");
+    document.getElementById("cam-status").classList.add("muted");
+    setTimeout(function() {
+        location.reload();
+    }, 2000);
 }
