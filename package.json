@@ -1,0 +1,12 @@
+{
+    "name": "agora-video-chat",
+    "version": "1.0.0",
+    "description": "Application de visioconférence avec Agora",
+    "main": "server.js",
+    "scripts": {
+        "start": "node server.js"
+    },
+    "dependencies": {
+        "express": "^4.18.2"
+    }
+}

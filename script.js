@@ -10,7 +10,7 @@ let client;
 let localTracks = [];
 let remoteUsers = {};
 let isModerator = false;
-let dataChannel;
+let connectionAttemptTime = null;
 
 document.addEventListener("DOMContentLoaded", () => {
     document.getElementById("join-btn").addEventListener("click", joinCall);
@@ -39,6 +39,21 @@ async function checkCameraPermissions() {
     }
 }
 
+async function cleanupResources() {
+    if (localTracks) {
+        for (let track of localTracks) {
+            track.stop();
+            track.close();
+        }
+        localTracks = [];
+    }
+    if (client) {
+        await client.leave();
+    }
+    remoteUsers = {};
+    updateUserCount();
+}
+
 async function joinCall() {
     try {
         if (typeof AgoraRTC === 'undefined') {
@@ -59,6 +74,9 @@ async function joinCall() {
 
         document.getElementById("join-btn").disabled = true;
 
+        // Enregistrer le moment de la tentative de connexion
+        connectionAttemptTime = Date.now();
+
         // Création du client
         client = AgoraRTC.createClient({ mode: "rtc", codec: "vp8" });
         console.log("Client Agora créé avec succès");
@@ -70,28 +88,6 @@ async function joinCall() {
         console.log("Tentative de connexion au canal:", config.channel);
         await client.join(config.appId, config.channel, config.token, config.uid);
         console.log("Connexion au canal réussie");
-
-        // Vérifier si un modérateur existe déjà pour ce canal
-        const moderatorKey = `moderator_${config.channel}`;
-        const existingModerator = localStorage.getItem(moderatorKey);
-
-        if (!existingModerator) {
-            // Si aucun modérateur n'existe, on devient modérateur
-            localStorage.setItem(moderatorKey, config.uid.toString());
-            isModerator = true;
-            document.getElementById('moderator-controls').style.display = 'flex';
-            console.log("Utilisateur est devenu modérateur");
-        } else if (existingModerator === config.uid.toString()) {
-            // Si on est déjà le modérateur
-            isModerator = true;
-            document.getElementById('moderator-controls').style.display = 'flex';
-            console.log("Utilisateur est modérateur");
-        } else {
-            // Si quelqu'un d'autre est modérateur
-            isModerator = false;
-            document.getElementById('moderator-controls').style.display = 'none';
-            console.log("Utilisateur est participant");
-        }
 
         // Initialiser les tracks immédiatement
         await initializeTracks();
@@ -111,6 +107,22 @@ function setupEventHandlers() {
     client.on("user-joined", handleUserJoined);
     client.on("connection-state-change", (curState, prevState) => {
         console.log("État de la connexion:", prevState, "->", curState);
+        if (curState === "CONNECTED") {
+            // Attendre un court délai pour voir si d'autres utilisateurs sont déjà connectés
+            setTimeout(() => {
+                if (Object.keys(remoteUsers).length === 0) {
+                    // Si aucun autre utilisateur n'est connecté, on est le premier
+                    isModerator = true;
+                    document.getElementById('moderator-controls').style.display = 'flex';
+                    console.log("Premier utilisateur - devenu modérateur");
+                } else {
+                    // Si d'autres utilisateurs sont déjà connectés, on est un participant
+                    isModerator = false;
+                    document.getElementById('moderator-controls').style.display = 'none';
+                    console.log("Utilisateur est participant");
+                }
+            }, 1000); // Attendre 1 seconde pour voir si d'autres utilisateurs se connectent
+        }
     });
 }
 
@@ -153,7 +165,7 @@ function updateUI() {
     document.querySelector('.control-buttons').prepend(roleIndicator);
 }
 
-function handleUserJoined(user) {
+async function handleUserJoined(user) {
     console.log("Nouvel utilisateur rejoint:", user.uid);
 }
 
@@ -165,13 +177,11 @@ async function handleUserPublished(user, mediaType) {
         if (mediaType === "video") {
             addVideoStream(user);
             user.videoTrack.play(`user-${user.uid}`);
-            // Stocker la référence à la track vidéo
             user.remoteVideoTrack = user.videoTrack;
         }
 
         if (mediaType === "audio") {
             user.audioTrack.play();
-            // Stocker la référence à la track audio
             user.remoteAudioTrack = user.audioTrack;
         }
 
@@ -193,7 +203,15 @@ function handleUserUnpublished(user) {
     updateUserCount();
 }
 
-function handleUserLeft(user) {
+async function handleUserLeft(user) {
+    console.log("Utilisateur parti:", user.uid);
+
+    // Supprimer les contrôles du modérateur
+    const userControlDiv = document.getElementById(`user-control-${user.uid}`);
+    if (userControlDiv) {
+        userControlDiv.remove();
+    }
+
     const el = document.getElementById(`user-${user.uid}`);
     if (el) el.remove();
     delete remoteUsers[user.uid];
@@ -300,22 +318,13 @@ async function toggleRemoteUserMic(uid) {
     const user = remoteUsers[uid];
     if (user && user.remoteAudioTrack) {
         try {
-            // Arrêter ou démarrer la track audio
             if (user.remoteAudioTrack.isPlaying) {
-                user.remoteAudioTrack.stop();
+                await user.remoteAudioTrack.stop();
+                document.getElementById(`mic-control-${uid}`).innerHTML = '<i class="fas fa-microphone-slash"></i> Micro';
             } else {
-                user.remoteAudioTrack.play();
+                await user.remoteAudioTrack.play();
+                document.getElementById(`mic-control-${uid}`).innerHTML = '<i class="fas fa-microphone"></i> Micro';
             }
-
-            // Mettre à jour l'interface
-            const micButton = document.getElementById(`mic-control-${uid}`);
-            if (micButton) {
-                micButton.classList.toggle('active');
-                micButton.innerHTML = micButton.classList.contains('active') ?
-                    '<i class="fas fa-microphone-slash"></i> Micro' :
-                    '<i class="fas fa-microphone"></i> Micro';
-            }
-
             console.log(`Micro ${user.remoteAudioTrack.isPlaying ? 'activé' : 'désactivé'} pour l'utilisateur ${uid}`);
         } catch (error) {
             console.error('Erreur lors de la tentative de basculer le micro:', error);
@@ -328,22 +337,13 @@ async function toggleRemoteUserCamera(uid) {
     const user = remoteUsers[uid];
     if (user && user.remoteVideoTrack) {
         try {
-            // Arrêter ou démarrer la track vidéo
             if (user.remoteVideoTrack.isPlaying) {
-                user.remoteVideoTrack.stop();
+                await user.remoteVideoTrack.stop();
+                document.getElementById(`cam-control-${uid}`).innerHTML = '<i class="fas fa-video-slash"></i> Caméra';
             } else {
-                user.remoteVideoTrack.play(`user-${uid}`);
+                await user.remoteVideoTrack.play(`user-${uid}`);
+                document.getElementById(`cam-control-${uid}`).innerHTML = '<i class="fas fa-video"></i> Caméra';
             }
-
-            // Mettre à jour l'interface
-            const camButton = document.getElementById(`cam-control-${uid}`);
-            if (camButton) {
-                camButton.classList.toggle('active');
-                camButton.innerHTML = camButton.classList.contains('active') ?
-                    '<i class="fas fa-video-slash"></i> Caméra' :
-                    '<i class="fas fa-video"></i> Caméra';
-            }
-
             console.log(`Caméra ${user.remoteVideoTrack.isPlaying ? 'activée' : 'désactivée'} pour l'utilisateur ${uid}`);
         } catch (error) {
             console.error('Erreur lors de la tentative de basculer la caméra:', error);
@@ -388,12 +388,6 @@ async function kickUser(uid) {
 }
 
 async function leaveCall() {
-    // Si on est modérateur, libérer le rôle
-    if (isModerator) {
-        const moderatorKey = `moderator_${config.channel}`;
-        localStorage.removeItem(moderatorKey);
-    }
-
     for (let track of localTracks) {
         track.stop();
         track.close();
