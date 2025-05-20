@@ -10,8 +10,6 @@ let client;
 let localTracks = [];
 let remoteUsers = {};
 let isModerator = false;
-let pendingUsers = new Set();
-let moderatorLock = false;
 let dataChannel;
 
 document.addEventListener("DOMContentLoaded", () => {
@@ -114,11 +112,6 @@ function setupEventHandlers() {
     client.on("connection-state-change", (curState, prevState) => {
         console.log("État de la connexion:", prevState, "->", curState);
     });
-
-    // Gestionnaire pour le canal de données
-    if (dataChannel) {
-        dataChannel.on("message", handleDataChannelMessage);
-    }
 }
 
 async function initializeTracks() {
@@ -164,80 +157,6 @@ function handleUserJoined(user) {
     console.log("Nouvel utilisateur rejoint:", user.uid);
 }
 
-function handleDataChannelMessage(event) {
-    try {
-        const data = JSON.parse(event.data);
-        console.log("Message reçu:", data);
-
-        if (data.type === 'check_moderator') {
-            if (isModerator) {
-                // Si on est déjà modérateur, on répond
-                dataChannel.send(JSON.stringify({
-                    type: 'moderator_exists',
-                    uid: config.uid
-                }));
-            }
-        } else if (data.type === 'moderator_exists') {
-            // Si quelqu'un répond qu'il est modérateur, on envoie une demande de permission
-            isModerator = false;
-            dataChannel.send(JSON.stringify({
-                type: 'permission_request',
-                uid: config.uid
-            }));
-            document.getElementById("status-indicators").innerHTML =
-                '<div class="waiting-message">En attente de l\'approbation du modérateur...</div>';
-        } else if (data.type === 'permission_request') {
-            if (isModerator) {
-                console.log("Demande de permission reçue de l'utilisateur:", data.uid);
-                addPendingUserControl(data.uid);
-            }
-        } else if (data.type === 'permission_response') {
-            if (data.approved) {
-                console.log("Permission accordée pour l'utilisateur:", data.uid);
-                initializeTracks();
-            } else {
-                console.log("Permission refusée pour l'utilisateur:", data.uid);
-                alert("Votre demande d'accès a été rejetée par le modérateur.");
-                leaveCall();
-            }
-        } else if (data.type === 'moderator') {
-            if (data.action === 'toggleMic' && localTracks[0]) {
-                localTracks[0].setMuted(!localTracks[0].muted);
-                updateIndicators();
-            } else if (data.action === 'toggleCamera' && localTracks[1]) {
-                localTracks[1].setMuted(!localTracks[1].muted);
-                updateIndicators();
-            } else if (data.action === 'kick') {
-                leaveCall();
-            }
-        }
-    } catch (error) {
-        console.error("Erreur lors du traitement du message:", error);
-    }
-}
-
-async function cleanupResources() {
-    if (client) {
-        try {
-            await client.leave();
-            console.log("Client déconnecté avec succès");
-        } catch (e) {
-            console.error("Erreur lors de la déconnexion du client:", e);
-        }
-    }
-    if (localTracks) {
-        localTracks.forEach(track => {
-            try {
-                track.stop();
-                track.close();
-                console.log("Track arrêtée et fermée avec succès");
-            } catch (e) {
-                console.error("Erreur lors de la fermeture des tracks:", e);
-            }
-        });
-    }
-}
-
 async function handleUserPublished(user, mediaType) {
     try {
         remoteUsers[user.uid] = user;
@@ -246,10 +165,14 @@ async function handleUserPublished(user, mediaType) {
         if (mediaType === "video") {
             addVideoStream(user);
             user.videoTrack.play(`user-${user.uid}`);
+            // Stocker la référence à la track vidéo
+            user.remoteVideoTrack = user.videoTrack;
         }
 
         if (mediaType === "audio") {
             user.audioTrack.play();
+            // Stocker la référence à la track audio
+            user.remoteAudioTrack = user.audioTrack;
         }
 
         // Si on est modérateur, ajouter les contrôles pour le nouvel utilisateur
@@ -345,73 +268,14 @@ async function toggleCamera() {
     updateIndicators();
 }
 
-// Fonction pour ajouter un contrôle pour un utilisateur en attente
-function addPendingUserControl(uid) {
-    const moderatorControls = document.getElementById('moderator-controls');
-    const pendingUserDiv = document.createElement('div');
-    pendingUserDiv.id = `pending-user-${uid}`;
-    pendingUserDiv.className = 'pending-user-control';
-    pendingUserDiv.innerHTML = `
-        <div class="user-info">
-            <span>Utilisateur ${uid} demande l'accès</span>
-            <div class="user-controls">
-                <button onclick="approveUser(${uid})" class="approve-btn">
-                    <i class="fas fa-check"></i> Approuver
-                </button>
-                <button onclick="rejectUser(${uid})" class="reject-btn">
-                    <i class="fas fa-times"></i> Rejeter
-                </button>
-            </div>
-        </div>
-    `;
-    moderatorControls.appendChild(pendingUserDiv);
-}
-
-// Fonction pour approuver un utilisateur
-async function approveUser(uid) {
-    try {
-        dataChannel.send(JSON.stringify({
-            type: 'permission_response',
-            approved: true,
-            uid: uid
-        }));
-        removePendingUserControl(uid);
-        addModeratorControl(uid);
-    } catch (error) {
-        console.error("Erreur lors de l'approbation:", error);
-    }
-}
-
-// Fonction pour rejeter un utilisateur
-async function rejectUser(uid) {
-    try {
-        dataChannel.send(JSON.stringify({
-            type: 'permission_response',
-            approved: false,
-            uid: uid
-        }));
-        removePendingUserControl(uid);
-    } catch (error) {
-        console.error("Erreur lors du rejet:", error);
-    }
-}
-
-// Fonction pour supprimer le contrôle d'un utilisateur en attente
-function removePendingUserControl(uid) {
-    const pendingUserDiv = document.getElementById(`pending-user-${uid}`);
-    if (pendingUserDiv) {
-        pendingUserDiv.remove();
-    }
-}
-
 function addModeratorControl(uid) {
-    // Ne pas ajouter de contrôles si on n'est pas modérateur
     if (!isModerator) return;
 
     const moderatorControls = document.getElementById('moderator-controls');
     const userControlDiv = document.createElement('div');
     userControlDiv.id = `user-control-${uid}`;
     userControlDiv.className = 'user-control';
+
     userControlDiv.innerHTML = `
         <div class="user-info">
             <span>Utilisateur ${uid}</span>
@@ -434,22 +298,25 @@ function addModeratorControl(uid) {
 async function toggleRemoteUserMic(uid) {
     if (!isModerator) return;
     const user = remoteUsers[uid];
-    if (user && user.audioTrack) {
+    if (user && user.remoteAudioTrack) {
         try {
-            // Utiliser la méthode setEnabled sur le RemoteTrack
-            const isEnabled = user.audioTrack.enabled;
-            user.audioTrack.setEnabled(!isEnabled);
+            // Arrêter ou démarrer la track audio
+            if (user.remoteAudioTrack.isPlaying) {
+                user.remoteAudioTrack.stop();
+            } else {
+                user.remoteAudioTrack.play();
+            }
 
             // Mettre à jour l'interface
             const micButton = document.getElementById(`mic-control-${uid}`);
             if (micButton) {
-                micButton.innerHTML = !isEnabled ?
-                    '<i class="fas fa-microphone"></i> Micro' :
-                    '<i class="fas fa-microphone-slash"></i> Micro';
-                micButton.classList.toggle('active', !isEnabled);
+                micButton.classList.toggle('active');
+                micButton.innerHTML = micButton.classList.contains('active') ?
+                    '<i class="fas fa-microphone-slash"></i> Micro' :
+                    '<i class="fas fa-microphone"></i> Micro';
             }
 
-            console.log(`Micro ${!isEnabled ? 'activé' : 'désactivé'} pour l'utilisateur ${uid}`);
+            console.log(`Micro ${user.remoteAudioTrack.isPlaying ? 'activé' : 'désactivé'} pour l'utilisateur ${uid}`);
         } catch (error) {
             console.error('Erreur lors de la tentative de basculer le micro:', error);
         }
@@ -459,22 +326,25 @@ async function toggleRemoteUserMic(uid) {
 async function toggleRemoteUserCamera(uid) {
     if (!isModerator) return;
     const user = remoteUsers[uid];
-    if (user && user.videoTrack) {
+    if (user && user.remoteVideoTrack) {
         try {
-            // Utiliser la méthode setEnabled sur le RemoteTrack
-            const isEnabled = user.videoTrack.enabled;
-            user.videoTrack.setEnabled(!isEnabled);
+            // Arrêter ou démarrer la track vidéo
+            if (user.remoteVideoTrack.isPlaying) {
+                user.remoteVideoTrack.stop();
+            } else {
+                user.remoteVideoTrack.play(`user-${uid}`);
+            }
 
             // Mettre à jour l'interface
             const camButton = document.getElementById(`cam-control-${uid}`);
             if (camButton) {
-                camButton.innerHTML = !isEnabled ?
-                    '<i class="fas fa-video"></i> Caméra' :
-                    '<i class="fas fa-video-slash"></i> Caméra';
-                camButton.classList.toggle('active', !isEnabled);
+                camButton.classList.toggle('active');
+                camButton.innerHTML = camButton.classList.contains('active') ?
+                    '<i class="fas fa-video-slash"></i> Caméra' :
+                    '<i class="fas fa-video"></i> Caméra';
             }
 
-            console.log(`Caméra ${!isEnabled ? 'activée' : 'désactivée'} pour l'utilisateur ${uid}`);
+            console.log(`Caméra ${user.remoteVideoTrack.isPlaying ? 'activée' : 'désactivée'} pour l'utilisateur ${uid}`);
         } catch (error) {
             console.error('Erreur lors de la tentative de basculer la caméra:', error);
         }
@@ -508,9 +378,9 @@ async function kickUser(uid) {
 
             // Supprimer de la liste des utilisateurs
             delete remoteUsers[uid];
+            updateUserCount();
 
             console.log(`Utilisateur ${uid} expulsé`);
-            updateUserCount();
         } catch (error) {
             console.error('Erreur lors de la tentative d\'expulsion:', error);
         }
