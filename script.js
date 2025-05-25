@@ -11,12 +11,20 @@ let localTracks = [];
 let remoteUsers = {};
 let isModerator = false;
 let connectionAttemptTime = null;
+const CONNECTION_TIMEOUT = 10000; // 10 secondes de timeout
 
 document.addEventListener("DOMContentLoaded", () => {
-    document.getElementById("join-btn").addEventListener("click", joinCall);
-    document.getElementById("leave-btn").addEventListener("click", leaveCall);
-    document.getElementById('toggleMic').addEventListener('click', toggleMic);
-    document.getElementById('toggleCamera').addEventListener('click', toggleCamera);
+    const joinBtn = document.getElementById("join-btn");
+    const leaveBtn = document.getElementById("leave-btn");
+    const leaveConferenceBtn = document.getElementById("leave-conference");
+    const toggleMicBtn = document.getElementById('toggleMic');
+    const toggleCameraBtn = document.getElementById('toggleCamera');
+
+    if (joinBtn) joinBtn.addEventListener("click", joinCall);
+    if (leaveBtn) leaveBtn.addEventListener("click", leaveCall);
+    if (leaveConferenceBtn) leaveConferenceBtn.addEventListener("click", leaveCall);
+    if (toggleMicBtn) toggleMicBtn.addEventListener('click', toggleMic);
+    if (toggleCameraBtn) toggleCameraBtn.addEventListener('click', toggleCamera);
 });
 
 // Fonction pour vérifier les permissions de la caméra
@@ -40,19 +48,112 @@ async function checkCameraPermissions() {
 }
 
 async function cleanupResources() {
-    if (localTracks) {
-        for (let track of localTracks) {
-            track.stop();
-            track.close();
+    try {
+        onLeavePresence();
+        if (localTracks) {
+            for (let track of localTracks) {
+                if (track) {
+                    track.stop();
+                    track.close();
+                }
+            }
+            localTracks = [];
         }
-        localTracks = [];
+        if (client) {
+            await client.leave();
+            client = null;
+        }
+        remoteUsers = {};
+        isModerator = false;
+        updateUserCount();
+    } catch (error) {
+        console.error("Erreur lors du nettoyage des ressources:", error);
     }
-    if (client) {
-        await client.leave();
-    }
-    remoteUsers = {};
-    updateUserCount();
 }
+
+// --- Gestion de la présence utilisateur via get_users.php ---
+
+function signalPresence(action) {
+    fetch('get_users.php', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({
+            uid: config.uid,
+            username: window.currentUsername || 'Utilisateur ' + config.uid,
+            action: action
+        })
+    });
+}
+
+function onJoinPresence() {
+    signalPresence('join');
+}
+
+function onLeavePresence() {
+    signalPresence('leave');
+}
+
+window.addEventListener('beforeunload', onLeavePresence);
+
+// Fonction pour afficher tous les containers utilisateurs (même sans flux)
+function updateUserGrid(users) {
+    const container = document.getElementById('video-container');
+    if (!container) return;
+
+    // Toujours s'assurer que le local est là
+    let localDiv = document.getElementById('local-video');
+    if (!localDiv) {
+        localDiv = document.createElement('div');
+        localDiv.id = 'local-video';
+        localDiv.className = 'video-placeholder';
+        let name = document.createElement('div');
+        name.className = 'user-name';
+        name.textContent = 'Vous';
+        localDiv.appendChild(name);
+        container.appendChild(localDiv);
+    } else if (!localDiv.querySelector('.user-name')) {
+        let name = document.createElement('div');
+        name.className = 'user-name';
+        name.textContent = 'Vous';
+        localDiv.appendChild(name);
+    }
+
+    // Ajoute les containers manquants pour chaque utilisateur distant
+    users.forEach(user => {
+        if (user.uid == config.uid) return; // On a déjà ajouté le local
+        let div = document.getElementById(`user-${user.uid}`);
+        if (!div) {
+            div = document.createElement('div');
+            div.className = 'video-placeholder';
+            div.id = `user-${user.uid}`;
+            let name = document.createElement('div');
+            name.className = 'user-name';
+            name.textContent = user.username || `Utilisateur ${user.uid}`;
+            div.appendChild(name);
+            container.appendChild(div);
+        } else {
+            // Met à jour le nom si besoin
+            let name = div.querySelector('.user-name');
+            if (!name) {
+                name = document.createElement('div');
+                name.className = 'user-name';
+                name.textContent = user.username || `Utilisateur ${user.uid}`;
+                div.appendChild(name);
+            }
+        }
+    });
+}
+
+function updatePresenceCount(users) {
+    document.getElementById("user-count").textContent = `👥 ${users.length} utilisateur(s) connecté(s)`;
+}
+
+setInterval(async() => {
+    const res = await fetch('get_users.php');
+    const users = await res.json();
+    updateUserGrid(users);
+    updatePresenceCount(users);
+}, 2000);
 
 async function joinCall() {
     try {
@@ -84,13 +185,20 @@ async function joinCall() {
         // Configuration des événements
         setupEventHandlers();
 
-        // Connexion au canal
-        console.log("Tentative de connexion au canal:", config.channel);
-        await client.join(config.appId, config.channel, config.token, config.uid);
+        // Ajout d'un timeout pour la connexion
+        const connectionPromise = client.join(config.appId, config.channel, config.token, config.uid);
+        const timeoutPromise = new Promise((_, reject) => {
+            setTimeout(() => reject(new Error("Timeout de connexion")), CONNECTION_TIMEOUT);
+        });
+
+        await Promise.race([connectionPromise, timeoutPromise]);
         console.log("Connexion au canal réussie");
 
         // Initialiser les tracks immédiatement
         await initializeTracks();
+
+        // Signale la présence après la connexion
+        onJoinPresence();
 
     } catch (error) {
         console.error("Erreur lors de la connexion:", error);
@@ -108,20 +216,18 @@ function setupEventHandlers() {
     client.on("connection-state-change", (curState, prevState) => {
         console.log("État de la connexion:", prevState, "->", curState);
         if (curState === "CONNECTED") {
-            // Attendre un court délai pour voir si d'autres utilisateurs sont déjà connectés
             setTimeout(() => {
                 if (Object.keys(remoteUsers).length === 0) {
-                    // Si aucun autre utilisateur n'est connecté, on est le premier
                     isModerator = true;
                     document.getElementById('moderator-controls').style.display = 'flex';
                     console.log("Premier utilisateur - devenu modérateur");
                 } else {
-                    // Si d'autres utilisateurs sont déjà connectés, on est un participant
                     isModerator = false;
                     document.getElementById('moderator-controls').style.display = 'none';
                     console.log("Utilisateur est participant");
+                    // Ne plus appeler muteLocalTracks ici
                 }
-            }, 1000); // Attendre 1 seconde pour voir si d'autres utilisateurs se connectent
+            }, 1000);
         }
     });
 }
@@ -129,50 +235,144 @@ function setupEventHandlers() {
 async function initializeTracks() {
     try {
         console.log("Création des tracks audio et vidéo...");
-        localTracks = await AgoraRTC.createMicrophoneAndCameraTracks();
-        console.log("Tracks créées avec succès");
+
+        // Vérifier si le client existe
+        if (!client) {
+            throw new Error("Client Agora non initialisé");
+        }
+
+        // Vérifier si les éléments DOM existent
+        const localVideoElement = document.getElementById("local-video");
+        if (!localVideoElement) {
+            throw new Error("Élément local-video non trouvé");
+        }
+
+        // Créer les tracks avec gestion d'erreur
+        try {
+            localTracks = await AgoraRTC.createMicrophoneAndCameraTracks({
+                encoderConfig: {
+                    width: 640,
+                    height: 480,
+                    frameRate: 30,
+                    bitrateMin: 600,
+                    bitrateMax: 2000
+                }
+            });
+        } catch (trackError) {
+            console.error("Erreur lors de la création des tracks:", trackError);
+            throw new Error("Impossible d'accéder à la caméra ou au microphone");
+        }
 
         if (!localTracks || localTracks.length < 2) {
             throw new Error("Erreur lors de la création des tracks");
         }
 
-        localTracks[1].play("local-video");
-        await client.publish(localTracks);
-        console.log("Tracks publiées avec succès");
+        // Jouer la vidéo locale
+        try {
+            await localTracks[1].play("local-video");
+        } catch (playError) {
+            console.error("Erreur lors de la lecture de la vidéo locale:", playError);
+            throw new Error("Impossible de lire la vidéo locale");
+        }
+
+        // Publier les tracks
+        try {
+            await client.publish(localTracks);
+            console.log("Tracks publiées avec succès");
+            // Si participant, mute micro et caméra après publication
+            if (!isModerator) {
+                await muteLocalTracks();
+            }
+        } catch (publishError) {
+            console.error("Erreur lors de la publication des tracks:", publishError);
+            throw new Error("Impossible de publier les tracks");
+        }
 
         updateUI();
         updateIndicators();
         updateUserCount();
     } catch (error) {
         console.error("Erreur lors de l'initialisation des tracks:", error);
+        await cleanupResources();
         throw error;
     }
 }
 
 function updateUI() {
-    document.querySelector('.control-buttons').style.display = 'flex';
-    document.querySelector('#status-indicators').style.display = 'inline-block';
-    document.querySelector('.input-group').style.display = 'none';
-    document.querySelector('#join-btn').style.display = 'none';
-    document.querySelector('footer').style.display = 'none';
-    document.getElementById("leave-btn").disabled = false;
+    try {
+        const elements = {
+            controlButtons: document.querySelector('.control-buttons'),
+            statusIndicators: document.querySelector('#status-indicators'),
+            inputGroup: document.querySelector('.input-group'),
+            joinBtn: document.querySelector('#join-btn'),
+            leaveBtn: document.getElementById("leave-btn"),
+            leaveConferenceBtn: document.getElementById("leave-conference"),
+            footer: document.querySelector('footer')
+        };
 
-    // Ajouter l'indicateur de rôle
-    const roleIndicator = document.createElement('div');
-    roleIndicator.id = 'role-indicator';
-    roleIndicator.className = 'role-indicator';
-    roleIndicator.textContent = isModerator ? '👑 Modérateur' : '👤 Participant';
-    document.querySelector('.control-buttons').prepend(roleIndicator);
+        // Mise à jour sécurisée des éléments
+        if (elements.controlButtons) {
+            elements.controlButtons.style.display = 'flex';
+
+            // Ajouter l'indicateur de rôle seulement si controlButtons existe
+            const existingRoleIndicator = document.getElementById('role-indicator');
+            if (!existingRoleIndicator) {
+                const roleIndicator = document.createElement('div');
+                roleIndicator.id = 'role-indicator';
+                roleIndicator.className = 'role-indicator';
+                roleIndicator.textContent = isModerator ? '👑 Modérateur' : '👤 Participant';
+                elements.controlButtons.prepend(roleIndicator);
+            }
+        }
+
+        if (elements.statusIndicators) {
+            elements.statusIndicators.style.display = 'inline-block';
+        }
+
+        if (elements.inputGroup) {
+            elements.inputGroup.style.display = 'none';
+        }
+
+        if (elements.joinBtn) {
+            elements.joinBtn.style.display = 'none';
+        }
+
+        if (elements.footer) {
+            elements.footer.style.display = 'none';
+        }
+
+        if (elements.leaveBtn) {
+            elements.leaveBtn.disabled = false;
+        }
+
+        if (elements.leaveConferenceBtn) {
+            elements.leaveConferenceBtn.style.display = 'flex';
+            elements.leaveConferenceBtn.disabled = false;
+        }
+
+        // Log des éléments manquants
+        Object.entries(elements).forEach(([key, element]) => {
+            if (!element) {
+                console.warn(`Élément ${key} non trouvé dans le DOM`);
+            }
+        });
+
+    } catch (error) {
+        console.error("Erreur lors de la mise à jour de l'interface:", error);
+    }
 }
 
 async function handleUserJoined(user) {
     console.log("Nouvel utilisateur rejoint:", user.uid);
+    updateUserCount();
+    if (typeof updateModeratorControls === 'function') updateModeratorControls();
 }
 
 async function handleUserPublished(user, mediaType) {
     try {
         remoteUsers[user.uid] = user;
         await client.subscribe(user, mediaType);
+        console.log(`Utilisateur ${user.uid} publié (${mediaType})`);
 
         if (mediaType === "video") {
             addVideoStream(user);
@@ -185,12 +385,8 @@ async function handleUserPublished(user, mediaType) {
             user.remoteAudioTrack = user.audioTrack;
         }
 
-        // Si on est modérateur, ajouter les contrôles pour le nouvel utilisateur
-        if (isModerator) {
-            addModeratorControl(user.uid);
-        }
-
         updateUserCount();
+        updateModeratorControls();
     } catch (error) {
         console.error("Erreur lors de la publication de l'utilisateur:", error);
     }
@@ -201,12 +397,13 @@ function handleUserUnpublished(user) {
     if (el) el.remove();
     delete remoteUsers[user.uid];
     updateUserCount();
+    updateModeratorControls();
+    console.log(`Utilisateur ${user.uid} a arrêté de publier.`);
 }
 
 async function handleUserLeft(user) {
     console.log("Utilisateur parti:", user.uid);
 
-    // Supprimer les contrôles du modérateur
     const userControlDiv = document.getElementById(`user-control-${user.uid}`);
     if (userControlDiv) {
         userControlDiv.remove();
@@ -216,10 +413,16 @@ async function handleUserLeft(user) {
     if (el) el.remove();
     delete remoteUsers[user.uid];
     updateUserCount();
+    updateModeratorControls();
+    console.log(`Utilisateur ${user.uid} supprimé de la liste.`);
 }
 
-// Fonction pour créer la vidéo distante
+// Fonction pour créer la vidéo distante (évite les doublons)
 function addVideoStream(user) {
+    if (document.getElementById(`user-${user.uid}`)) {
+        console.log(`La vidéo de l'utilisateur ${user.uid} existe déjà, on ne la rajoute pas.`);
+        return;
+    }
     const videoContainer = document.createElement("div");
     videoContainer.classList.add("video-placeholder");
     videoContainer.id = `user-${user.uid}`;
@@ -230,6 +433,7 @@ function addVideoStream(user) {
 
     videoContainer.appendChild(username);
     document.getElementById("video-container").appendChild(videoContainer);
+    console.log(`Ajout de la vidéo pour l'utilisateur ${user.uid}`);
 }
 
 // 🔄 Met à jour les indicateurs de statut
@@ -256,8 +460,36 @@ function updateIndicators() {
 
 // 🔢 Met à jour le nombre d'utilisateurs connectés
 function updateUserCount() {
-    const count = Object.keys(remoteUsers).length + (client ? 1 : 0);
+    // Toujours compter le local + tous les remoteUsers uniques
+    const count = 1 + Object.keys(remoteUsers).length;
     document.getElementById("user-count").textContent = `👥 ${count} utilisateur(s) connecté(s)`;
+    console.log(`Mise à jour du compteur : ${count} utilisateur(s)`);
+}
+
+// 🔄 Met à jour les contrôles du modérateur pour refléter la liste réelle des utilisateurs
+function updateModeratorControls() {
+    if (!isModerator) return;
+    const moderatorControls = document.getElementById('moderator-controls');
+    if (!moderatorControls) return;
+    // Nettoyer tous les anciens contrôles
+    moderatorControls.innerHTML = '';
+    // Ajouter un contrôle pour chaque utilisateur distant
+    Object.keys(remoteUsers).forEach(uid => {
+        addModeratorControl(uid);
+    });
+}
+
+// Désactive le micro et la caméra locaux
+async function muteLocalTracks() {
+    if (localTracks[0] && !localTracks[0].muted) {
+        await localTracks[0].setMuted(true);
+        document.getElementById('toggleMic').innerHTML = '<i class="fas fa-microphone-slash"></i>';
+    }
+    if (localTracks[1] && !localTracks[1].muted) {
+        await localTracks[1].setMuted(true);
+        document.getElementById('toggleCamera').innerHTML = '<i class="fas fa-video-slash"></i>';
+    }
+    updateIndicators();
 }
 
 // 🎤 Toggle micro
@@ -388,32 +620,54 @@ async function kickUser(uid) {
 }
 
 async function leaveCall() {
-    for (let track of localTracks) {
-        track.stop();
-        track.close();
-    }
+    try {
+        await cleanupResources();
 
-    await client.leave();
+        const elements = {
+            joinBtn: document.getElementById("join-btn"),
+            leaveBtn: document.getElementById("leave-btn"),
+            leaveConferenceBtn: document.getElementById("leave-conference"),
+            controlButtons: document.querySelector('.control-buttons'),
+            statusIndicators: document.querySelector('#status-indicators'),
+            inputGroup: document.querySelector('.input-group'),
+            footer: document.querySelector('footer')
+        };
 
-    document.getElementById("join-btn").disabled = false;
-    document.getElementById("leave-btn").disabled = true;
+        // Réinitialiser les boutons
+        if (elements.joinBtn) elements.joinBtn.disabled = false;
+        if (elements.leaveBtn) elements.leaveBtn.disabled = true;
+        if (elements.leaveConferenceBtn) elements.leaveConferenceBtn.disabled = true;
 
-    // Nettoie les vidéos distantes
-    Object.keys(remoteUsers).forEach(uid => {
-        const el = document.getElementById(`user-${uid}`);
-        if (el) el.remove();
-    });
+        // Réinitialiser l'interface
+        if (elements.controlButtons) elements.controlButtons.style.display = 'none';
+        if (elements.statusIndicators) elements.statusIndicators.style.display = 'none';
+        if (elements.inputGroup) elements.inputGroup.style.display = 'flex';
+        if (elements.footer) elements.footer.style.display = 'block';
 
-    remoteUsers = {};
-    updateUserCount();
+        // Réinitialiser les indicateurs
+        const micStatus = document.getElementById("mic-status");
+        const camStatus = document.getElementById("cam-status");
+        if (micStatus) {
+            micStatus.textContent = "🎤 Muet";
+            micStatus.classList.add("muted");
+        }
+        if (camStatus) {
+            camStatus.textContent = "📷 Caméra coupée";
+            camStatus.classList.add("muted");
+        }
 
-    // Réinitialise les indicateurs
-    document.querySelector('.control-buttons').style.display = 'none';
-    document.getElementById("mic-status").textContent = "🎤 Muet";
-    document.getElementById("cam-status").textContent = "📷 Caméra coupée";
-    document.getElementById("mic-status").classList.add("muted");
-    document.getElementById("cam-status").classList.add("muted");
-    setTimeout(function() {
+        // Supprimer l'indicateur de rôle
+        const roleIndicator = document.getElementById('role-indicator');
+        if (roleIndicator) {
+            roleIndicator.remove();
+        }
+
+        // Recharger la page après un court délai
+        setTimeout(() => {
+            location.reload();
+        }, 2000);
+    } catch (error) {
+        console.error("Erreur lors de la déconnexion:", error);
         location.reload();
-    }, 2000);
+    }
 }
